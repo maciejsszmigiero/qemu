@@ -76,6 +76,22 @@ typedef struct VFIOMigration {
 
     bool save_iterate_run;
     bool save_iterate_empty_hit;
+
+    QemuThread load_bufs_thread;
+    Error *load_bufs_thread_errp;
+    bool load_bufs_thread_started;
+    bool load_bufs_thread_finished;
+    bool load_bufs_thread_want_exit;
+
+    GArray *load_bufs;
+    bool load_bufs_device_ready;
+    QemuCond load_bufs_device_ready_cond;
+    QemuCond load_bufs_buffer_ready_cond;
+    QemuMutex load_bufs_mutex;
+    uint32_t load_buf_idx;
+    uint32_t load_buf_idx_last;
+    uint32_t load_buf_queued_pending_buffers;
+    bool config_state_loaded_to_dev;
 } VFIOMigration;
 
 struct VFIOGroup;
@@ -134,6 +150,7 @@ typedef struct VFIODevice {
     bool ram_block_discard_allowed;
     OnOffAuto enable_migration;
     bool migration_events;
+    uint64_t migration_max_queued_buffers;
     VFIODeviceOps *ops;
     unsigned int num_irqs;
     unsigned int num_regions;
