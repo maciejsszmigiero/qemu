@@ -457,6 +457,9 @@ struct MigrationState {
     bool switchover_acked;
     /* Is this a rdma migration */
     bool rdma_migration;
+
+    QemuCond load_finish_ready_cond;
+    QemuMutex load_finish_ready_mutex;
 };
 
 void migrate_set_state(MigrationStatus *state, MigrationStatus old_state,

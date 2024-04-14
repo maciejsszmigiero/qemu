@@ -3840,6 +3840,8 @@ static void migration_instance_finalize(Object *obj)
 {
     MigrationState *ms = MIGRATION_OBJ(obj);
 
+    qemu_mutex_destroy(&ms->load_finish_ready_mutex);
+    qemu_cond_destroy(&ms->load_finish_ready_cond);
     qemu_mutex_destroy(&ms->error_mutex);
     qemu_mutex_destroy(&ms->qemu_file_lock);
     qemu_sem_destroy(&ms->wait_unplug_sem);
@@ -3871,6 +3873,8 @@ static void migration_instance_init(Object *obj)
     qemu_sem_init(&ms->wait_unplug_sem, 0);
     qemu_sem_init(&ms->postcopy_qemufile_src_sem, 0);
     qemu_mutex_init(&ms->qemu_file_lock);
+    qemu_mutex_init(&ms->load_finish_ready_mutex);
+    qemu_cond_init(&ms->load_finish_ready_cond);
 }
 
 /*
