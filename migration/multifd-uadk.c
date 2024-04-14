@@ -198,7 +198,7 @@ static int multifd_uadk_send_prepare(MultiFDSendParams *p, Error **errp)
     }
 out:
     p->flags |= MULTIFD_FLAG_UADK;
-    multifd_send_fill_packet(p);
+    multifd_send_fill_packet_ram(p);
     return 0;
 }
 

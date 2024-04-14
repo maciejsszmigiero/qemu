@@ -143,7 +143,7 @@ static int multifd_zstd_send_prepare(MultiFDSendParams *p, Error **errp)
 
 out:
     p->flags |= MULTIFD_FLAG_ZSTD;
-    multifd_send_fill_packet(p);
+    multifd_send_fill_packet_ram(p);
     return 0;
 }
 

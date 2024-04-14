@@ -12,6 +12,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/iov.h"
 #include "qemu/rcu.h"
 #include "exec/target_page.h"
 #include "sysemu/sysemu.h"
@@ -19,6 +20,7 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "file.h"
+#include "migration/misc.h"
 #include "migration.h"
 #include "migration-stats.h"
 #include "savevm.h"
@@ -107,7 +109,9 @@ MultiFDSendData *multifd_send_data_alloc(void)
      * added to the union in the future are larger than
      * (MultiFDPages_t + flex array).
      */
-    max_payload_size = MAX(multifd_ram_payload_size(), sizeof(MultiFDPayload));
+    max_payload_size = MAX(multifd_ram_payload_size(),
+                           multifd_device_state_payload_size());
+    max_payload_size = MAX(max_payload_size, sizeof(MultiFDPayload));
 
     /*
      * Account for any holes the compiler might insert. We can't pack
@@ -126,6 +130,9 @@ void multifd_send_data_clear(MultiFDSendData *data)
     }
 
     switch (data->type) {
+    case MULTIFD_PAYLOAD_DEVICE_STATE:
+        multifd_device_state_clear(&data->u.device_state);
+        break;
     default:
         /* Nothing to do */
         break;
@@ -228,7 +235,7 @@ static int multifd_recv_initial_packet(QIOChannel *c, Error **errp)
     return msg.id;
 }
 
-void multifd_send_fill_packet(MultiFDSendParams *p)
+void multifd_send_fill_packet_ram(MultiFDSendParams *p)
 {
     MultiFDPacket_t *packet = p->packet;
     uint64_t packet_num;
@@ -397,19 +404,15 @@ bool multifd_send(MultiFDSendData **send_data)
 
         p = &multifd_send_state->params[i];
         /*
-         * Lockless read to p->pending_job is safe, because only multifd
-         * sender thread can clear it.
+         * Lockless RMW on p->pending_job_preparing is safe, because only multifd
+         * sender thread can clear it after it had seen p->pending_job being set.
+         *
+         * Pairs with qatomic_store_release() in multifd_send_thread().
          */
-        if (qatomic_read(&p->pending_job) == false) {
+        if (qatomic_cmpxchg(&p->pending_job_preparing, false, true) == false) {
             break;
         }
     }
-
-    /*
-     * Make sure we read p->pending_job before all the rest.  Pairs with
-     * qatomic_store_release() in multifd_send_thread().
-     */
-    smp_mb_acquire();
 
     assert(multifd_payload_empty(p->data));
 
@@ -534,6 +537,7 @@ static bool multifd_send_cleanup_channel(MultiFDSendParams *p, Error **errp)
     p->name = NULL;
     g_clear_pointer(&p->data, multifd_send_data_free);
     p->packet_len = 0;
+    g_clear_pointer(&p->packet_device_state, g_free);
     g_free(p->packet);
     p->packet = NULL;
     multifd_send_state->ops->send_cleanup(p, errp);
@@ -545,6 +549,7 @@ static void multifd_send_cleanup_state(void)
 {
     file_cleanup_outgoing_migration();
     socket_cleanup_outgoing_migration();
+    multifd_device_state_save_cleanup();
     qemu_sem_destroy(&multifd_send_state->channels_created);
     qemu_sem_destroy(&multifd_send_state->channels_ready);
     g_free(multifd_send_state->params);
@@ -670,19 +675,29 @@ static void *multifd_send_thread(void *opaque)
          * qatomic_store_release() in multifd_send().
          */
         if (qatomic_load_acquire(&p->pending_job)) {
+            bool is_device_state = multifd_payload_device_state(p->data);
+            size_t total_size;
+
             p->flags = 0;
             p->iovs_num = 0;
             assert(!multifd_payload_empty(p->data));
 
-            ret = multifd_send_state->ops->send_prepare(p, &local_err);
-            if (ret != 0) {
-                break;
+            if (is_device_state) {
+                multifd_device_state_send_prepare(p);
+            } else {
+                ret = multifd_send_state->ops->send_prepare(p, &local_err);
+                if (ret != 0) {
+                    break;
+                }
             }
 
             if (migrate_mapped_ram()) {
+                assert(!is_device_state);
+
                 ret = file_write_ramblock_iov(p->c, p->iov, p->iovs_num,
                                               &p->data->u.ram, &local_err);
             } else {
+                total_size = iov_size(p->iov, p->iovs_num);
                 ret = qio_channel_writev_full_all(p->c, p->iov, p->iovs_num,
                                                   NULL, 0, p->write_flags,
                                                   &local_err);
@@ -692,18 +707,27 @@ static void *multifd_send_thread(void *opaque)
                 break;
             }
 
-            stat64_add(&mig_stats.multifd_bytes,
-                       p->next_packet_size + p->packet_len);
+            if (is_device_state) {
+                stat64_add(&mig_stats.multifd_bytes, total_size);
+            } else {
+                /*
+                 * Can't just always add total_size since IOVs do not include
+                 * packet header in the zerocopy RAM case.
+                 */
+                stat64_add(&mig_stats.multifd_bytes,
+                           p->next_packet_size + p->packet_len);
+            }
 
             p->next_packet_size = 0;
             multifd_send_data_clear(p->data);
 
             /*
              * Making sure p->data is published before saying "we're
-             * free".  Pairs with the smp_mb_acquire() in
+             * free".  Pairs with the qatomic_cmpxchg() in
              * multifd_send().
              */
             qatomic_store_release(&p->pending_job, false);
+            qatomic_store_release(&p->pending_job_preparing, false);
         } else {
             /*
              * If not a normal job, must be a sync request.  Note that
@@ -714,7 +738,7 @@ static void *multifd_send_thread(void *opaque)
 
             if (use_packets) {
                 p->flags = MULTIFD_FLAG_SYNC;
-                multifd_send_fill_packet(p);
+                multifd_send_fill_packet_ram(p);
                 ret = qio_channel_write_all(p->c, (void *)p->packet,
                                             p->packet_len, &local_err);
                 if (ret != 0) {
@@ -910,6 +934,9 @@ bool multifd_send_setup(void)
             p->packet_len = sizeof(MultiFDPacket_t)
                           + sizeof(uint64_t) * page_count;
             p->packet = g_malloc0(p->packet_len);
+            p->packet_device_state = g_malloc0(sizeof(*p->packet_device_state));
+            p->packet_device_state->hdr.magic = cpu_to_be32(MULTIFD_MAGIC);
+            p->packet_device_state->hdr.version = cpu_to_be32(MULTIFD_VERSION);
         }
         p->name = g_strdup_printf("mig/src/send_%d", i);
         p->write_flags = 0;
@@ -943,6 +970,8 @@ bool multifd_send_setup(void)
             goto err;
         }
     }
+
+    multifd_device_state_save_setup();
 
     return true;
 
