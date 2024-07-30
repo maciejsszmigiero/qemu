@@ -107,7 +107,7 @@ void tpm_backend_deliver_request(TPMBackend *s, TPMBackendCmd *cmd)
 
     s->cmd = cmd;
     object_ref(OBJECT(s));
-    thread_pool_submit_aio(tpm_backend_worker_thread, s,
+    thread_pool_submit_aio(tpm_backend_worker_thread, s, NULL,
                            tpm_backend_request_completed, s);
 }
 

@@ -517,7 +517,7 @@ static int spapr_nvdimm_flush_post_load(void *opaque, int version_id)
     }
 
     QLIST_FOREACH(state, &s_nvdimm->pending_nvdimm_flush_states, node) {
-        thread_pool_submit_aio(flush_worker_cb, state,
+        thread_pool_submit_aio(flush_worker_cb, state, NULL,
                                spapr_nvdimm_flush_completion_cb, state);
     }
 
@@ -698,7 +698,7 @@ static target_ulong h_scm_flush(PowerPCCPU *cpu, SpaprMachineState *spapr,
 
         state->drcidx = drc_index;
 
-        thread_pool_submit_aio(flush_worker_cb, state,
+        thread_pool_submit_aio(flush_worker_cb, state, NULL,
                                spapr_nvdimm_flush_completion_cb, state);
 
         continue_token = state->continue_token;

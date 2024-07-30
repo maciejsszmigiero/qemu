@@ -41,5 +41,6 @@ static int coroutine_enter_func(void *arg)
 void co_run_in_worker_bh(void *opaque)
 {
     Coroutine *co = opaque;
-    thread_pool_submit_aio(coroutine_enter_func, co, coroutine_enter_cb, co);
+    thread_pool_submit_aio(coroutine_enter_func, co, NULL,
+                           coroutine_enter_cb, co);
 }

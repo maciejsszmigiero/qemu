@@ -38,6 +38,7 @@ struct ThreadPoolElement {
     ThreadPool *pool;
     ThreadPoolFunc *func;
     void *arg;
+    GDestroyNotify arg_destroy;
 
     /* Moving state out of THREAD_QUEUED is protected by lock.  After
      * that, only the worker thread can write to it.  Reads and writes
@@ -188,6 +189,10 @@ restart:
                                    elem->ret);
         QLIST_REMOVE(elem, all);
 
+        if (elem->arg_destroy) {
+            elem->arg_destroy(elem->arg);
+        }
+
         if (elem->common.cb) {
             /* Read state before ret.  */
             smp_rmb();
@@ -238,7 +243,8 @@ static const AIOCBInfo thread_pool_aiocb_info = {
     .cancel_async       = thread_pool_cancel,
 };
 
-BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func, void *arg,
+BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func,
+                                   void *arg, GDestroyNotify arg_destroy,
                                    BlockCompletionFunc *cb, void *opaque)
 {
     ThreadPoolElement *req;
@@ -251,6 +257,7 @@ BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func, void *arg,
     req = qemu_aio_get(&thread_pool_aiocb_info, NULL, cb, opaque);
     req->func = func;
     req->arg = arg;
+    req->arg_destroy = arg_destroy;
     req->state = THREAD_QUEUED;
     req->pool = pool;
 
@@ -285,14 +292,15 @@ int coroutine_fn thread_pool_submit_co(ThreadPoolFunc *func, void *arg)
 {
     ThreadPoolCo tpc = { .co = qemu_coroutine_self(), .ret = -EINPROGRESS };
     assert(qemu_in_coroutine());
-    thread_pool_submit_aio(func, arg, thread_pool_co_cb, &tpc);
+    thread_pool_submit_aio(func, arg, NULL, thread_pool_co_cb, &tpc);
     qemu_coroutine_yield();
     return tpc.ret;
 }
 
-void thread_pool_submit(ThreadPoolFunc *func, void *arg)
+void thread_pool_submit(ThreadPoolFunc *func,
+                        void *arg, GDestroyNotify arg_destroy)
 {
-    thread_pool_submit_aio(func, arg, NULL, NULL);
+    thread_pool_submit_aio(func, arg, arg_destroy, NULL, NULL);
 }
 
 void thread_pool_update_params(ThreadPool *pool, AioContext *ctx)
