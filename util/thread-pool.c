@@ -60,6 +60,7 @@ struct ThreadPool {
     QemuMutex lock;
     QemuCond worker_stopped;
     QemuCond request_cond;
+    QemuCond no_requests_cond;
     QEMUBH *new_thread_bh;
 
     /* The following variables are only accessed from one AioContext. */
@@ -73,6 +74,7 @@ struct ThreadPool {
     int pending_threads; /* threads created but not running yet */
     int min_threads;
     int max_threads;
+    size_t requests_executing;
 };
 
 static void *worker_thread(void *opaque)
@@ -107,6 +109,10 @@ static void *worker_thread(void *opaque)
         req = QTAILQ_FIRST(&pool->request_list);
         QTAILQ_REMOVE(&pool->request_list, req, reqs);
         req->state = THREAD_ACTIVE;
+
+        assert(pool->requests_executing < SIZE_MAX);
+        pool->requests_executing++;
+
         qemu_mutex_unlock(&pool->lock);
 
         ret = req->func(req->arg);
@@ -118,6 +124,14 @@ static void *worker_thread(void *opaque)
 
         qemu_bh_schedule(pool->completion_bh);
         qemu_mutex_lock(&pool->lock);
+
+        assert(pool->requests_executing > 0);
+        pool->requests_executing--;
+
+        if (pool->requests_executing == 0 &&
+            QTAILQ_EMPTY(&pool->request_list)) {
+            qemu_cond_signal(&pool->no_requests_cond);
+        }
     }
 
     pool->cur_threads--;
@@ -243,13 +257,16 @@ static const AIOCBInfo thread_pool_aiocb_info = {
     .cancel_async       = thread_pool_cancel,
 };
 
-BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func,
-                                   void *arg, GDestroyNotify arg_destroy,
-                                   BlockCompletionFunc *cb, void *opaque)
+BlockAIOCB *thread_pool_submit(ThreadPool *pool, ThreadPoolFunc *func,
+                               void *arg, GDestroyNotify arg_destroy,
+                               BlockCompletionFunc *cb, void *opaque)
 {
     ThreadPoolElement *req;
     AioContext *ctx = qemu_get_current_aio_context();
-    ThreadPool *pool = aio_get_thread_pool(ctx);
+
+    if (!pool) {
+        pool = aio_get_thread_pool(ctx);
+    }
 
     /* Assert that the thread submitting work is the same running the pool */
     assert(pool->ctx == qemu_get_current_aio_context());
@@ -275,6 +292,18 @@ BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func,
     return &req->common;
 }
 
+BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func,
+                                   void *arg, GDestroyNotify arg_destroy,
+                                   BlockCompletionFunc *cb, void *opaque)
+{
+    return thread_pool_submit(NULL, func, arg, arg_destroy, cb, opaque);
+}
+
+void thread_pool_poll(ThreadPool *pool)
+{
+    aio_bh_poll(pool->ctx);
+}
+
 typedef struct ThreadPoolCo {
     Coroutine *co;
     int ret;
@@ -297,18 +326,38 @@ int coroutine_fn thread_pool_submit_co(ThreadPoolFunc *func, void *arg)
     return tpc.ret;
 }
 
-void thread_pool_submit(ThreadPoolFunc *func,
-                        void *arg, GDestroyNotify arg_destroy)
+void thread_pool_join(ThreadPool *pool)
 {
-    thread_pool_submit_aio(func, arg, arg_destroy, NULL, NULL);
-}
+    /* Assert that the thread waiting is the same running the pool */
+    assert(pool->ctx == qemu_get_current_aio_context());
 
-void thread_pool_update_params(ThreadPool *pool, AioContext *ctx)
-{
     qemu_mutex_lock(&pool->lock);
 
-    pool->min_threads = ctx->thread_pool_min;
-    pool->max_threads = ctx->thread_pool_max;
+    if (pool->requests_executing > 0 ||
+        !QTAILQ_EMPTY(&pool->request_list)) {
+        qemu_cond_wait(&pool->no_requests_cond, &pool->lock);
+    }
+    assert(pool->requests_executing == 0 &&
+           QTAILQ_EMPTY(&pool->request_list));
+
+    qemu_mutex_unlock(&pool->lock);
+
+    aio_bh_poll(pool->ctx);
+
+    assert(QLIST_EMPTY(&pool->head));
+}
+
+void thread_pool_set_minmax_threads(ThreadPool *pool,
+                                    int min_threads, int max_threads)
+{
+    assert(min_threads >= 0);
+    assert(max_threads > 0);
+    assert(max_threads >= min_threads);
+
+    qemu_mutex_lock(&pool->lock);
+
+    pool->min_threads = min_threads;
+    pool->max_threads = max_threads;
 
     /*
      * We either have to:
@@ -330,6 +379,12 @@ void thread_pool_update_params(ThreadPool *pool, AioContext *ctx)
     qemu_mutex_unlock(&pool->lock);
 }
 
+void thread_pool_update_params(ThreadPool *pool, AioContext *ctx)
+{
+    thread_pool_set_minmax_threads(pool,
+                                   ctx->thread_pool_min, ctx->thread_pool_max);
+}
+
 static void thread_pool_init_one(ThreadPool *pool, AioContext *ctx)
 {
     if (!ctx) {
@@ -342,6 +397,7 @@ static void thread_pool_init_one(ThreadPool *pool, AioContext *ctx)
     qemu_mutex_init(&pool->lock);
     qemu_cond_init(&pool->worker_stopped);
     qemu_cond_init(&pool->request_cond);
+    qemu_cond_init(&pool->no_requests_cond);
     pool->new_thread_bh = aio_bh_new(ctx, spawn_thread_bh_fn, pool);
 
     QLIST_INIT(&pool->head);
@@ -382,6 +438,7 @@ void thread_pool_free(ThreadPool *pool)
     qemu_mutex_unlock(&pool->lock);
 
     qemu_bh_delete(pool->completion_bh);
+    qemu_cond_destroy(&pool->no_requests_cond);
     qemu_cond_destroy(&pool->request_cond);
     qemu_cond_destroy(&pool->worker_stopped);
     qemu_mutex_destroy(&pool->lock);

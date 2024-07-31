@@ -37,9 +37,15 @@ BlockAIOCB *thread_pool_submit_aio(ThreadPoolFunc *func,
                                    void *arg, GDestroyNotify arg_destroy,
                                    BlockCompletionFunc *cb, void *opaque);
 int coroutine_fn thread_pool_submit_co(ThreadPoolFunc *func, void *arg);
-void thread_pool_submit(ThreadPoolFunc *func,
-                        void *arg, GDestroyNotify arg_destroy);
+BlockAIOCB *thread_pool_submit(ThreadPool *pool, ThreadPoolFunc *func,
+                               void *arg, GDestroyNotify arg_destroy,
+                               BlockCompletionFunc *cb, void *opaque);
 
+void thread_pool_join(ThreadPool *pool);
+void thread_pool_poll(ThreadPool *pool);
+
+void thread_pool_set_minmax_threads(ThreadPool *pool,
+                                    int min_threads, int max_threads);
 void thread_pool_update_params(ThreadPool *pool, struct AioContext *ctx);
 
 #endif
