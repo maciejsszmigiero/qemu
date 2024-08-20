@@ -1495,6 +1495,7 @@ int qemu_savevm_state_complete_precopy_iterable(QEMUFile *f, bool in_postcopy)
     int64_t start_ts_each, end_ts_each;
     SaveStateEntry *se;
     int ret;
+    bool multifd_device_state = migration_has_device_state_support();
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
         if (!se->ops || (in_postcopy && se->ops->has_postcopy &&
@@ -1514,6 +1515,30 @@ int qemu_savevm_state_complete_precopy_iterable(QEMUFile *f, bool in_postcopy)
         if (ret < 0) {
             qemu_file_set_error(f, ret);
             return -1;
+        }
+    }
+
+    if (multifd_device_state) {
+        int thread_count = 0;
+
+        QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+            SaveLiveCompletePrecopyThreadHandler hdlr;
+
+            if (!se->ops || (in_postcopy && se->ops->has_postcopy &&
+                             se->ops->has_postcopy(se->opaque)) ||
+                !se->ops->save_live_complete_precopy_thread) {
+                continue;
+            }
+
+            hdlr = se->ops->save_live_complete_precopy_thread;
+            multifd_spawn_device_state_save_thread(hdlr,
+                                                   se->idstr, se->instance_id,
+                                                   se->opaque);
+            thread_count++;
+        }
+
+        if (thread_count > 0) {
+            multifd_launch_device_state_save_threads(thread_count);
         }
     }
 
@@ -1541,11 +1566,19 @@ int qemu_savevm_state_complete_precopy_iterable(QEMUFile *f, bool in_postcopy)
         save_section_footer(f, se);
         if (ret < 0) {
             qemu_file_set_error(f, ret);
-            return -1;
+            goto ret_fail_abort_threads;
         }
         end_ts_each = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         trace_vmstate_downtime_save("iterable", se->idstr, se->instance_id,
                                     end_ts_each - start_ts_each);
+    }
+
+    if (multifd_device_state) {
+        ret = multifd_join_device_state_save_threads();
+        if (ret) {
+            qemu_file_set_error(f, ret);
+            return -1;
+        }
     }
 
     QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
@@ -1565,6 +1598,14 @@ int qemu_savevm_state_complete_precopy_iterable(QEMUFile *f, bool in_postcopy)
     trace_vmstate_downtime_checkpoint("src-iterable-saved");
 
     return 0;
+
+ret_fail_abort_threads:
+    if (multifd_device_state) {
+        multifd_abort_device_state_save_threads();
+        multifd_join_device_state_save_threads();
+    }
+
+    return -1;
 }
 
 int qemu_savevm_state_complete_precopy_non_iterable(QEMUFile *f,
