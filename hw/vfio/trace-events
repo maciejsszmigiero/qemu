@@ -158,7 +158,7 @@ vfio_load_state_device_buffer_start(const char *name) " (%s)"
 vfio_load_state_device_buffer_starved(const char *name, uint32_t idx) " (%s) idx %"PRIu32
 vfio_load_state_device_buffer_load_start(const char *name, uint32_t idx) " (%s) idx %"PRIu32
 vfio_load_state_device_buffer_load_end(const char *name, uint32_t idx) " (%s) idx %"PRIu32
-vfio_load_state_device_buffer_end(const char *name) " (%s)"
+vfio_load_state_device_buffer_end(const char *name, uint64_t wait_time, uint64_t load_time) " (%s) wait %"PRIu64" ms load %"PRIu64" ms"
 vfio_migration_realize(const char *name) " (%s)"
 vfio_migration_set_device_state(const char *name, const char *state) " (%s) state %s"
 vfio_migration_set_state(const char *name, const char *new_state, const char *recover_state) " (%s) new state %s, recover state %s"

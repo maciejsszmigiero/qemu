@@ -356,6 +356,8 @@ static void *vfio_load_bufs_thread(void *opaque)
     g_autoptr(QemuLockable) locker = qemu_lockable_auto_lock(
         QEMU_MAKE_LOCKABLE(&migration->load_bufs_mutex));
     LoadedBuffer *lb;
+    uint64_t total_load_time = 0;
+    uint64_t total_wait_time = 0;
 
     while (!migration->load_bufs_device_ready &&
            !migration->load_bufs_thread_want_exit) {
@@ -377,8 +379,16 @@ static void *vfio_load_bufs_thread(void *opaque)
         }
 
         if (starved) {
+            int64_t start_time, wait_time;
+
             trace_vfio_load_state_device_buffer_starved(vbasedev->name, migration->load_buf_idx);
+
+            start_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
             qemu_cond_wait(&migration->load_bufs_buffer_ready_cond, &migration->load_bufs_mutex);
+            wait_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_time;
+            assert(wait_time >= 0);
+            total_wait_time += wait_time;
+
             continue;
         }
 
@@ -394,6 +404,7 @@ static void *vfio_load_bufs_thread(void *opaque)
             g_autofree char *buf = NULL;
             size_t buf_len;
             int errno_save;
+            int64_t start_time, load_time;
 
             trace_vfio_load_state_device_buffer_load_start(vbasedev->name,
                                                            migration->load_buf_idx);
@@ -404,8 +415,14 @@ static void *vfio_load_bufs_thread(void *opaque)
 
             /* Loading data to the device takes a while, drop the lock during this process */
             qemu_mutex_unlock(&migration->load_bufs_mutex);
+
+            start_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
             ret = write(migration->data_fd, buf, buf_len);
             errno_save = errno;
+            load_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_time;
+            assert(load_time >= 0);
+            total_load_time += load_time;
+
             qemu_mutex_lock(&migration->load_bufs_mutex);
 
             if (ret < 0) {
@@ -426,7 +443,7 @@ static void *vfio_load_bufs_thread(void *opaque)
         migration->load_buf_queued_pending_buffers--;
 
         if (migration->load_buf_idx == migration->load_buf_idx_last - 1) {
-            trace_vfio_load_state_device_buffer_end(vbasedev->name);
+            trace_vfio_load_state_device_buffer_end(vbasedev->name, total_wait_time / 1000, total_load_time / 1000);
         }
 
         migration->load_buf_idx++;
