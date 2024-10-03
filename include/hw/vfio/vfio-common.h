@@ -88,6 +88,7 @@ typedef struct VFIOMigration {
     bool load_bufs_device_ready;
     QemuCond load_bufs_device_ready_cond;
     QemuCond load_bufs_buffer_ready_cond;
+    QemuCond load_bufs_buffers_consumed_cond;
     QemuMutex load_bufs_mutex;
     uint32_t load_buf_idx;
     uint32_t load_buf_idx_last;

@@ -345,6 +345,10 @@ static int vfio_load_state_buffer(void *opaque, char *data, size_t data_size,
 
     qemu_cond_broadcast(&migration->load_bufs_buffer_ready_cond);
 
+    if (migration->load_bufs_device_ready) {
+        qemu_cond_wait(&migration->load_bufs_buffers_consumed_cond, &migration->load_bufs_mutex);
+    }
+
     return 0;
 }
 
@@ -383,6 +387,8 @@ static void *vfio_load_bufs_thread(void *opaque)
 
             trace_vfio_load_state_device_buffer_starved(vbasedev->name, migration->load_buf_idx);
 
+            qemu_cond_broadcast(&migration->load_bufs_buffers_consumed_cond);
+
             start_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
             qemu_cond_wait(&migration->load_bufs_buffer_ready_cond, &migration->load_bufs_mutex);
             wait_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_time;
@@ -393,6 +399,7 @@ static void *vfio_load_bufs_thread(void *opaque)
         }
 
         if (migration->load_buf_idx == migration->load_buf_idx_last) {
+            qemu_cond_broadcast(&migration->load_bufs_buffers_consumed_cond);
             break;
         }
 
@@ -1088,6 +1095,7 @@ static int vfio_load_setup(QEMUFile *f, void *opaque, Error **errp)
     migration->load_buf_idx_last = UINT32_MAX;
     migration->load_buf_queued_pending_buffers = 0;
     qemu_cond_init(&migration->load_bufs_buffer_ready_cond);
+    qemu_cond_init(&migration->load_bufs_buffers_consumed_cond);
 
     migration->config_state_loaded_to_dev = false;
 
@@ -1126,6 +1134,7 @@ static int vfio_load_cleanup(void *opaque)
     vfio_migration_cleanup(vbasedev);
 
     g_clear_pointer(&migration->load_bufs, g_array_unref);
+    qemu_cond_destroy(&migration->load_bufs_buffers_consumed_cond);
     qemu_cond_destroy(&migration->load_bufs_buffer_ready_cond);
     qemu_cond_destroy(&migration->load_bufs_device_ready_cond);
     qemu_mutex_destroy(&migration->load_bufs_mutex);
